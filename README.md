@@ -1,6 +1,6 @@
 # Spring Cloud Microservices Patterns 🚀
 
-A comprehensive, event-driven microservices architecture built with Spring Boot and Spring Cloud. This repository serves as a masterclass and reference implementation for **28 core microservices patterns and concepts**, making it perfect for learning and interview preparation.
+A comprehensive, event-driven microservices architecture built with Spring Boot and Spring Cloud. This repository serves as a masterclass and reference implementation for **29 core microservices patterns and concepts**, making it perfect for learning and interview preparation.
 
 ---
 
@@ -130,4 +130,4 @@ Stop the `inventory-service` and place an order.
 
 ## 📖 Interview Preparation Guide
 
-This repository contains a massive, detailed **[Interview Preparation Guide (INTERVIEW_PREP.md)](INTERVIEW_PREP.md)** right in the root folder. It covers all 28 patterns implemented in this project in a "Why -> What -> How" format, complete with sample interview Q&A.
+This repository contains a massive, detailed **[Interview Preparation Guide (INTERVIEW_PREP.md)](INTERVIEW_PREP.md)** right in the root folder. It covers all 29 patterns implemented in this project in a "Why -> What -> How" format, complete with sample interview Q&A.

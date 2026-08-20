@@ -26,7 +26,8 @@
 17. [Actuator & Health Checks](#17-actuator-and-health-checks)
 18. [Docker & Docker Compose](#18-docker-and-docker-compose)
 19. [Graceful Shutdown](#19-graceful-shutdown)
-20. [Rapid-Fire Interview Questions](#20-rapid-fire)
+20. [Central Configuration (Spring Cloud Config Server)](#20-central-configuration)
+21. [Rapid-Fire Interview Questions](#21-rapid-fire)
 
 ---
 
@@ -1017,8 +1018,159 @@ When you stop the service:
 
 ---
 
-<a id="20-rapid-fire"></a>
-## 20. 🔥 Rapid-Fire Interview Questions
+<a id="20-central-configuration"></a>
+## 20. Central Configuration (Spring Cloud Config Server)
+
+### The Problem
+
+Each microservice has its own `application.properties`. In our project, **before** Config Server, we had:
+
+```
+order-service/src/main/resources/application.properties       → 83 lines
+inventory-service/src/main/resources/application.properties   → 65 lines
+notification-service/src/main/resources/application.properties → 50 lines
+api-gateway/src/main/resources/application.yml                → 65 lines
+```
+
+Problems:
+- **Duplication**: Eureka URL, Kafka broker, Zipkin endpoint, Actuator settings — **copy-pasted** across every service
+- **Change Kafka broker?** Edit 4 files, redeploy 4 services
+- **Environment-specific configs?** (dev, staging, prod) — maintain 4 × 3 = 12 config files
+- **Secrets scattered** across multiple services
+
+### The Solution: Spring Cloud Config Server
+
+A **single server** that serves configuration to all services from a **Git repository**.
+
+```mermaid
+graph LR
+    GitRepo[("GitHub config-repo")] -->|git pull| ConfigServer("Config Server :8888")
+    ConfigServer -->|Serves config| OS["order-service"]
+    ConfigServer -->|Serves config| IS["inventory-service"]
+    ConfigServer -->|Serves config| NS["notification-service"]
+    ConfigServer -->|Serves config| GW["api-gateway"]
+```
+
+### How It Works
+
+**Step 1: Config files stored in Git** (in `config-repo/` folder)
+
+```
+config-repo/
+├── application.properties           ← Shared by ALL services
+├── order-service.properties         ← Only for order-service
+├── inventory-service.properties     ← Only for inventory-service
+├── notification-service.properties  ← Only for notification-service
+└── api-gateway.properties           ← Only for api-gateway
+```
+
+**Naming convention is critical:**
+- `application.properties` → applied to **every** service (shared config)
+- `{spring.application.name}.properties` → applied only to **that specific** service
+- Config Server **merges** both: shared + service-specific (service-specific wins on conflicts)
+
+**Step 2: Config Server reads from Git**
+
+```java
+@SpringBootApplication
+@EnableConfigServer   // ← This is all you need!
+public class ConfigServerApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(ConfigServerApplication.class, args);
+    }
+}
+```
+
+```properties
+# config-server/application.properties
+spring.application.name=config-server
+server.port=8888
+spring.cloud.config.server.git.uri=https://github.com/Kt129673/spring-cloud-microservices-patterns
+spring.cloud.config.server.git.search-paths=config-repo
+spring.cloud.config.server.git.default-label=main
+```
+
+**Step 3: Each service fetches config at startup**
+
+Service's local `application.properties` is now just 2 lines:
+
+```properties
+spring.application.name=order-service
+spring.config.import=optional:configserver:http://localhost:8888
+```
+
+- `spring.config.import` → tells Spring Boot to pull config from Config Server **before** starting
+- `optional:` prefix → if Config Server is down, service starts with local defaults (useful for dev)
+- Config Server looks at `spring.application.name` to know which `{name}.properties` file to serve
+
+### What We Centralized (Shared `application.properties`)
+
+| Property Group | Why Shared |
+|---|---|
+| Eureka Client (`defaultZone`, `prefer-ip-address`) | Every service registers with the same Eureka |
+| Kafka Broker (`bootstrap-servers`) | Every service connects to the same Kafka |
+| Zipkin Tracing (`sampling.probability`, `endpoint`) | Every service sends traces to the same Zipkin |
+| Actuator (`health`, `info`, `metrics`) | Standard monitoring across all services |
+| Graceful Shutdown (`server.shutdown=graceful`) | Consistent shutdown behavior |
+
+### Before vs After
+
+| Aspect | Before | After |
+|---|---|---|
+| Config files per service | 50-83 lines | **6 lines** |
+| Change Kafka broker | Edit 4 files, redeploy 4 services | Edit **1 file** in Git, restart |
+| Config duplication | Eureka, Kafka, Zipkin copied everywhere | Written **once** in shared config |
+| Environment management | Copy-paste across profiles | `order-service-prod.properties` in Git |
+| Config history | None | Full **Git history** with blame, diff, rollback |
+
+### Config Server API
+
+Config Server exposes a REST API — you can check any service's resolved config:
+
+```bash
+# View order-service config for default profile
+curl http://localhost:8888/order-service/default
+
+# View shared config
+curl http://localhost:8888/application/default
+```
+
+Response shows the merged config with **property sources** (which file each property came from).
+
+### Why Eureka Server Does NOT Use Config Server
+
+> [!WARNING]
+> Config Server registers with Eureka. If Eureka also depended on Config Server, you'd have a **circular dependency** — neither can start first. Solution: Eureka keeps its own local config.
+
+### Startup Order Matters!
+
+```
+1. Eureka Server    ← Must start first (discovery)
+2. Config Server    ← Registers with Eureka, serves config
+3. All other services ← Fetch config from Config Server, register with Eureka
+```
+
+### 🎤 Interview Q&A
+
+**Q: Why use a Config Server instead of environment variables?**
+> A: Environment variables work for simple cases but don't support: (1) **version history** — Git tracks who changed what and when, with rollback. (2) **Centralized management** — one place to update, not SSH into every server. (3) **Profile-based configs** — `application-prod.properties` vs `application-dev.properties` served automatically. (4) **Encryption** — Config Server can decrypt secrets at serve time using symmetric or asymmetric keys.
+
+**Q: What happens if Config Server is down when a service starts?**
+> A: With `optional:configserver:` prefix, the service starts with whatever local config it has (may fail on missing properties like DB URL). Without `optional:`, the service **fails to start** — which is actually desired in production to ensure consistent configuration. In production, you run **multiple Config Server instances** behind a load balancer.
+
+**Q: How do you refresh config without restarting services?**
+> A: Three approaches: (1) **Manual** — call `POST /actuator/refresh` on each service (requires `@RefreshScope` on beans). (2) **Spring Cloud Bus** — call refresh on ONE service, it broadcasts to all via Kafka/RabbitMQ. (3) **Webhook** — configure Git to call Config Server on push, which triggers a bus refresh event automatically.
+
+**Q: How do you handle secrets (passwords, API keys) in Config Server?**
+> A: Never store secrets in plain text in Git. Options: (1) **Spring Cloud Config encryption** — encrypt values in Git, Config Server decrypts at serve time. (2) **HashiCorp Vault** as a backend instead of Git. (3) **AWS Secrets Manager / Azure Key Vault** — Config Server integrates natively. (4) **Environment variables** for truly sensitive values, combined with Config Server for everything else.
+
+**Q: Config Server vs Kubernetes ConfigMaps?**
+> A: K8s ConfigMaps are simpler (native to K8s, no extra service) but lack version history, encryption, and multi-environment management out of the box. Spring Cloud Config Server works across any deployment (Docker, VMs, K8s) and provides Git-backed audit trails. Many companies use **both**: ConfigMaps for infrastructure settings, Config Server for application-level config.
+
+---
+
+<a id="21-rapid-fire"></a>
+## 21. 🔥 Rapid-Fire Interview Questions
 
 ### Architecture & Design
 
@@ -1054,10 +1206,13 @@ When you stop the service:
 ### Spring Cloud
 
 **Q: What is Spring Cloud?**
-> A collection of tools/libraries for building microservices in Java: Eureka (discovery), Gateway (routing), Feign (HTTP client), Resilience4j (fault tolerance), Config Server (centralized config), Sleuth/Micrometer (tracing).
+> A collection of tools/libraries for building microservices in Java: Eureka (discovery), Gateway (routing), Config Server (centralized configuration), Feign (HTTP client), Resilience4j (fault tolerance), Micrometer (tracing).
 
 **Q: How do you handle configuration in microservices?**
-> Spring Cloud Config Server — stores all configs in a Git repo. Services fetch their config at startup. Changes in Git are reflected without redeployment (using `@RefreshScope` + `/actuator/refresh`).
+> Spring Cloud Config Server — stores all configs in a Git repo. Services fetch their config at startup. Shared properties (Eureka, Kafka, Zipkin, Actuator) go in `application.properties`, service-specific properties go in `{service-name}.properties`. Changes in Git are reflected without redeployment (using `@RefreshScope` + `/actuator/refresh` or Spring Cloud Bus for broadcast refresh).
+
+**Q: What is the `spring.config.import` property?**
+> Introduced in Spring Boot 2.4, it replaces the older `bootstrap.yml` approach. `spring.config.import=configserver:http://localhost:8888` tells Spring Boot to fetch config from Config Server before loading the application context. The `optional:` prefix allows the service to start even if Config Server is unavailable.
 
 ---
 
@@ -1081,10 +1236,11 @@ When you stop the service:
 
 | Interview Question | Point to This in Your Project |
 |---|---|
-| "Explain microservice architecture" | 3 independent services + Eureka + Gateway |
+| "Explain microservice architecture" | 3 independent services + Eureka + Gateway + Config Server |
 | "How do services communicate?" | Feign (sync) + Kafka (async) — both in order-service |
 | "What if a service is down?" | Circuit Breaker with fallback in InventoryClient |
 | "How do you handle distributed transactions?" | SAGA — InventoryEvent feeds back to order-service |
+| "How do you manage configuration?" | Config Server — GitHub-backed, shared + per-service configs |
 | "How do you trace a request?" | Zipkin — show the trace waterfall |
 | "How do you search logs?" | Kibana — search by traceId across all services |
 | "What about message failures?" | Dead Letter Topic + DltConsumer |
@@ -1093,4 +1249,4 @@ When you stop the service:
 | "How do you deploy?" | Docker Compose for infra, each service is an independent JAR |
 
 > [!TIP]
-> **Interview strategy:** Don't just say "I used Eureka for service discovery." Instead say: "In my project, I have 3 services — order, inventory, and notification. They register with Eureka. When order-service needs to call inventory-service via Feign, it resolves the name `inventory-service` through Eureka. If I run 3 instances of inventory-service, Spring Cloud LoadBalancer distributes calls across them, and if one is down, the circuit breaker kicks in with a fallback response." — **That's how you impress.**
+> **Interview strategy:** Don't just say "I used Eureka for service discovery." Instead say: "In my project, I have 3 services — order, inventory, and notification. All their configuration is centralized in a Git-backed Config Server. They register with Eureka. When order-service needs to call inventory-service via Feign, it resolves the name `inventory-service` through Eureka. If I run 3 instances of inventory-service, Spring Cloud LoadBalancer distributes calls across them, and if one is down, the circuit breaker kicks in with a fallback response. If I need to change the Kafka broker URL, I update ONE file in Git and all services pick it up." — **That's how you impress.**

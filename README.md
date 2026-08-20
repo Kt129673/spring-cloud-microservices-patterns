@@ -22,6 +22,15 @@ graph TD
         Eureka -.->|Registers| OrderService
         Eureka -.->|Registers| InventoryService
         Eureka -.->|Registers| NotificationService("Notification Service :8083")
+        Eureka -.->|Registers| ConfigServer
+    end
+    
+    subgraph Central Configuration
+        ConfigServer("Config Server :8888") -->|Reads config| GitRepo[("GitHub config-repo")]
+        OrderService -.->|Fetches config| ConfigServer
+        InventoryService -.->|Fetches config| ConfigServer
+        NotificationService -.->|Fetches config| ConfigServer
+        Gateway -.->|Fetches config| ConfigServer
     end
     
     OrderService -->|"1. Sync check (Feign)"| InventoryService
@@ -48,6 +57,7 @@ graph TD
 - **Core**: Java 17, Spring Boot 3.x
 - **Service Discovery**: Spring Cloud Netflix Eureka
 - **API Gateway**: Spring Cloud Gateway
+- **Central Configuration**: Spring Cloud Config Server (GitHub-backed)
 - **Synchronous Comm**: OpenFeign
 - **Fault Tolerance**: Resilience4j (Circuit Breaker, Retry, Fallback)
 - **Asynchronous Comm**: Apache Kafka
@@ -72,13 +82,15 @@ docker-compose up -d
 ### 2. Start Microservices (Maven)
 Start the services **in this exact order**:
 1. **`eureka-server`** (Starts on port `8761`)
-2. **`api-gateway`** (Starts on port `8080`)
-3. **`inventory-service`** (Starts on port `8082`)
-4. **`order-service`** (Starts on port `8081`)
-5. **`notification-service`** (Starts on port `8083`)
+2. **`config-server`** (Starts on port `8888`) — *must start before other services*
+3. **`api-gateway`** (Starts on port `8080`)
+4. **`inventory-service`** (Starts on port `8082`)
+5. **`order-service`** (Starts on port `8081`)
+6. **`notification-service`** (Starts on port `8083`)
 
 ### 3. Key Dashboards
 - **Eureka Registry**: [http://localhost:8761](http://localhost:8761)
+- **Config Server**: [http://localhost:8888/order-service/default](http://localhost:8888/order-service/default) *(view any service's config)*
 - **Zipkin Traces**: [http://localhost:9411](http://localhost:9411)
 - **Kibana Logs**: [http://localhost:5601](http://localhost:5601)
 

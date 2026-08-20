@@ -16,6 +16,23 @@ import org.springframework.stereotype.Service;
  *   - Check stock availability
  *   - Deduct stock if available → publish CONFIRMED
  *   - If insufficient → publish FAILED (SAGA compensation trigger)
+ *
+ * ┌───────────────────────────────────────────────────────────────────────────┐
+ * │ 🔄 MONOLITH vs MICROSERVICE                                             │
+ * │                                                                         │
+ * │ In a monolith, communication is SYNCHRONOUS. Order calls Inventory,     │
+ * │ waits for a return value, and holds the thread.                         │
+ * │                                                                         │
+ * │ In microservices, we use ASYNCHRONOUS messaging (Kafka) for state       │
+ * │ changes.                                                                │
+ * │                                                                         │
+ * │ WHY ASYNC?                                                              │
+ * │ - Decoupling: order-service doesn't care if inventory-service is        │
+ * │   temporarily down. Kafka holds the message until it comes back up.     │
+ * │ - Performance: order-service doesn't wait for inventory processing.     │
+ * │ - Scalability: If orders spike, we just spin up more InventoryConsumers │
+ * │   in a consumer group to chew through the Kafka backlog.                │
+ * └───────────────────────────────────────────────────────────────────────────┘
  */
 @Service
 public class OrderConsumer {

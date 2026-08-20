@@ -8,7 +8,24 @@ import org.springframework.stereotype.Service;
 
 /**
  * Notification consumer — listens for InventoryEvents and simulates email notifications.
- * In production, this would integrate with JavaMailSender or a notification provider (SendGrid, SNS).
+ *
+ * ┌───────────────────────────────────────────────────────────────────────────┐
+ * │ 🔄 MONOLITH vs MICROSERVICE                                             │
+ * │                                                                         │
+ * │ What is a "Consumer Group"?                                             │
+ * │ Notice we use groupId = "notification-group".                           │
+ * │ In order-service, we used groupId = "order-saga-group".                 │
+ * │                                                                         │
+ * │ Because they have DIFFERENT group IDs, Kafka delivers the EXACT SAME    │
+ * │ message to BOTH services (Fan-out pattern).                             │
+ * │                                                                         │
+ * │ - order-service gets the message and updates DB status to CONFIRMED.    │
+ * │ - notification-service gets the message and sends an email.             │
+ * │                                                                         │
+ * │ If we run 3 instances of notification-service, they all share the       │
+ * │ "notification-group", so Kafka load-balances the emails among them      │
+ * │ (each message goes to only ONE instance within the group).              │
+ * └───────────────────────────────────────────────────────────────────────────┘
  */
 @Service
 public class NotificationConsumer {

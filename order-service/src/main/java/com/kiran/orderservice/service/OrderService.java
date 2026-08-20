@@ -17,6 +17,35 @@ import org.springframework.stereotype.Service;
 import java.util.List;
 import java.util.stream.Collectors;
 
+/**
+ * ORDER SERVICE — Business Logic and SAGA Orchestration/Choreography
+ *
+ * ┌───────────────────────────────────────────────────────────────────────────┐
+ * │ 🔄 MONOLITH vs MICROSERVICE                                             │
+ * │                                                                         │
+ * │ In a monolith, deductStock() is a method call. If it throws an          │
+ * │ InsufficientStockException, the @Transactional boundary catches it      │
+ * │ and rolls back the order creation automatically.                        │
+ * │                                                                         │
+ * │ In microservices, we use the SAGA PATTERN for distributed transactions: │
+ * │                                                                         │
+ * │ Step 1 (Sync): order-service asks inventory-service "do you have it?"   │
+ * │   -> Uses Feign. If inventory is down, Circuit Breaker provides fallback│
+ * │                                                                         │
+ * │ Step 2 (Local): order-service saves order as CREATED (Pending)          │
+ * │                                                                         │
+ * │ Step 3 (Async): order-service publishes OrderEvent to Kafka             │
+ * │                                                                         │
+ * │ Step 4 (Remote): inventory-service consumes event, tries to deduct      │
+ * │   stock. If it fails, it publishes an InventoryEvent(status=FAILED).    │
+ * │                                                                         │
+ * │ Step 5 (Compensation): order-service consumes the FAILED event and      │
+ * │   UPDATES the order status to FAILED.                                   │
+ * │                                                                         │
+ * │ This means we don't lock databases across the network. We rely on       │
+ * │ compensating transactions to undo work if a later step fails.           │
+ * └───────────────────────────────────────────────────────────────────────────┘
+ */
 @Service
 public class OrderService {
 

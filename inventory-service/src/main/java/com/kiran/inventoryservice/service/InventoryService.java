@@ -13,6 +13,24 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.List;
 import java.util.stream.Collectors;
 
+/**
+ * INVENTORY SERVICE — Business Logic
+ *
+ * ┌───────────────────────────────────────────────────────────────────────────┐
+ * │ 🔄 MONOLITH vs MICROSERVICE                                             │
+ * │                                                                         │
+ * │ In a monolith, this service would take an Order object, check stock,    │
+ * │ deduct it, and save the Order all at once.                              │
+ * │                                                                         │
+ * │ In microservices, this service knows NOTHING about the Order entity.    │
+ * │ It only knows about "productName" and "quantity".                       │
+ * │ This is called a "Bounded Context" in Domain-Driven Design (DDD).       │
+ * │                                                                         │
+ * │ The order-service owns the Order state. The inventory-service owns      │
+ * │ the Stock state. They collaborate via events, but they don't share      │
+ * │ their internal models.                                                  │
+ * └───────────────────────────────────────────────────────────────────────────┘
+ */
 @Service
 public class InventoryService {
 

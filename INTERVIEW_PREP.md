@@ -1302,6 +1302,32 @@ Response shows the merged config with **property sources** (which file each prop
 **Q: How do you handle API versioning?**
 > URL versioning (`/api/v1/orders`, `/api/v2/orders`), header versioning (`Accept: application/vnd.myapp.v2+json`), or query param (`/api/orders?version=2`). URL versioning is most common and readable.
 
+**Q: What is the CAP Theorem?**
+> In a distributed system, you can only guarantee **two out of three**: **Consistency** (all nodes see the same data), **Availability** (every request gets a response), **Partition Tolerance** (system works despite network failures). Since network partitions are unavoidable, the real choice is **CP** (Consistent + Partition-tolerant — e.g., Consul, Zookeeper) vs **AP** (Available + Partition-tolerant — e.g., Eureka, Cassandra). Our project uses **AP** — Eureka favors availability over consistency.
+
+**Q: What is Eventual Consistency? How do you handle it?**
+> In microservices, after order-service saves an order and publishes a Kafka event, there's a brief period where order-service has the data but inventory-service hasn't processed it yet — they're **temporarily inconsistent**. Eventually, the Kafka consumer processes the event and both services are consistent. To handle it: (1) Design UIs to show "Processing" status, (2) Use SAGA pattern for compensation on failure, (3) Never assume cross-service reads are up-to-date — embrace eventual consistency and design around it.
+
+**Q: What is the 12-Factor App methodology?**
+> Twelve principles for building cloud-native apps. Key ones for microservices:
+> - **Codebase**: One repo per service (or monorepo with clear boundaries)
+> - **Config**: Store config in environment / Config Server, NOT in code
+> - **Dependencies**: Explicitly declare (Maven `pom.xml`), never rely on system-wide packages
+> - **Backing services**: Treat DB, Kafka, Redis as attached resources (swap without code changes)
+> - **Port binding**: Each service exports HTTP on its own port
+> - **Concurrency**: Scale by running multiple instances (horizontal scaling)
+> - **Disposability**: Fast startup + graceful shutdown
+> - **Logs**: Treat logs as event streams (stdout → Logstash → ELK)
+
+**Q: What is the Strangler Fig Pattern?**
+> Incrementally migrate from monolith to microservices. Place the API Gateway in front of the monolith. Extract one module at a time into a microservice. Route traffic for that module to the new service, everything else stays with the monolith. Repeat until the monolith is empty ("strangled"). Named after the fig vine that grows around a tree and eventually replaces it.
+
+**Q: What is the Sidecar Pattern?**
+> Deploy a helper container alongside each service container. The sidecar handles cross-cutting concerns (logging, monitoring, TLS, retries) so the service doesn't need to implement them. Example: Envoy proxy as a sidecar in Istio service mesh. Each service pod has 2 containers — the app + the Envoy sidecar.
+
+**Q: What are Bounded Contexts in Domain-Driven Design (DDD)?**
+> Each microservice should map to one bounded context — a clear boundary around a domain model. Example: "Order" in order-service means {orderId, product, quantity, status}. "Order" in billing-service means {orderId, amount, paymentStatus}. Same word, different models. Services should NOT share domain models — each owns its own definition.
+
 ---
 
 ### Kafka Deep Dive
@@ -1345,6 +1371,86 @@ Response shows the merged config with **property sources** (which file each prop
 
 **Q: What is Rate Limiting?**
 > Limit the number of API calls a client can make (e.g., 100 requests/minute). Implemented at the API Gateway level using Spring Cloud Gateway's `RequestRateLimiter` filter with Redis as the rate limiter backend.
+
+---
+
+### Microservices Anti-Patterns (Interviewers LOVE These)
+
+**Q: What is a Distributed Monolith?**
+> The #1 anti-pattern. You split code into separate services, but they're **tightly coupled** — they share databases, deploy together, or can't function without each other. Symptoms: changing one service forces changes in 3 others. Fix: enforce **Database per Service**, use async events for loose coupling, ensure each service can be deployed independently.
+
+**Q: What is the Shared Database anti-pattern?**
+> Multiple services read/write the same database tables. This defeats the purpose of microservices — you can't change one service's schema without breaking others, and you can't scale independently. Fix: each service owns its data. If order-service needs inventory data, it calls inventory-service's API, never queries inventory's DB directly.
+
+**Q: What is the Chatty Service anti-pattern?**
+> Service A makes 50 small REST calls to Service B to complete one operation. Network latency multiplied 50x kills performance. Fix: (1) Create a **batch API** — `POST /inventory/check-batch` with list of products. (2) Use **API Composition** — one call that returns aggregated data. (3) Consider if these services should be **merged** back into one.
+
+**Q: What is the Nano-Service anti-pattern?**
+> Splitting too granular — a service that does almost nothing (e.g., a service just for email validation). The overhead of deployment, monitoring, and inter-service calls outweighs the benefit. Fix: merge related nano-services. Not everything needs to be a separate service. A service should represent a **business capability**, not a single function.
+
+---
+
+### Testing Microservices
+
+**Q: How do you test microservices?**
+> Testing pyramid for microservices:
+> - **Unit Tests** (bottom, most) — Test individual classes/methods. Mock dependencies. Fast, run locally.
+> - **Integration Tests** — Test service + real DB (H2/Testcontainers). Verify JPA queries, Kafka producer/consumer, REST controllers with `@SpringBootTest`.
+> - **Contract Tests** — Verify API contracts between services using **Spring Cloud Contract** or **Pact**. Producer guarantees the response format, consumer verifies it. Prevents breaking changes.
+> - **End-to-End Tests** (top, fewest) — Start all services, run real scenarios. Slowest but most realistic. Use **Docker Compose + Testcontainers**.
+
+**Q: What is Contract Testing? Why is it important?**
+> Order-service calls inventory-service's `GET /inventory/{product}`. If inventory-service changes the response from `{"inStock": true}` to `{"available": true}`, order-service breaks at runtime (no compile-time check). **Contract tests** catch this: inventory-service publishes a contract saying "I will return a field called `inStock`". Order-service tests against that contract. If inventory-service changes it, the contract test fails BEFORE deployment. Tools: **Spring Cloud Contract**, **Pact**.
+
+**Q: What is Testcontainers? Why use it?**
+> A Java library that runs **real Docker containers** during tests — real PostgreSQL, real Kafka, real Redis instead of mocks. Your integration tests are more realistic. Example: `@Testcontainers` + `@Container PostgreSQLContainer` gives you a real DB during `@SpringBootTest`. After the test, the container is destroyed. No more "works in tests, fails in production" because you tested against a mock.
+
+---
+
+### Deployment Strategies
+
+**Q: What is Blue/Green Deployment?**
+> Run two identical environments: **Blue** (current prod) and **Green** (new version). Deploy new version to Green. Test it. When ready, switch the load balancer from Blue → Green instantly. If something breaks, switch back to Blue (instant rollback). Downside: you need **double the infrastructure** during deployment.
+
+**Q: What is Canary Deployment?**
+> Deploy the new version to a **small percentage of traffic** (e.g., 5%). Monitor error rates and latency. If healthy, gradually increase (10% → 25% → 50% → 100%). If problems, rollback only affects 5% of users. More resource-efficient than Blue/Green. Tools: Kubernetes + Istio, AWS CodeDeploy.
+
+**Q: Rolling Deployment vs Blue/Green vs Canary — when to use which?**
+> - **Rolling**: Default for Kubernetes. Replace instances one by one. Simple but both versions run simultaneously during deployment — must be backward-compatible.
+> - **Blue/Green**: When you need instant switch and instant rollback. Costly (double infra) but safest.
+> - **Canary**: When you want to validate with real production traffic before full rollout. Best for high-traffic systems where a full rollout bug impacts millions.
+
+**Q: How do you handle database schema changes in zero-downtime deployments?**
+> Never run destructive migrations during deployment. Use **Expand-Migrate-Contract** pattern:
+> 1. **Expand**: Add new columns/tables (backward compatible). Deploy code that writes to both old and new columns.
+> 2. **Migrate**: Backfill existing data to new format. Switch reads to new column.
+> 3. **Contract**: Remove old column in a later release, after all services have migrated.
+> Tool: **Flyway** or **Liquibase** for versioned DB migrations.
+
+---
+
+### Spring Boot Internals (Frequently Asked)
+
+**Q: What is Spring Boot Auto-Configuration?**
+> Spring Boot automatically configures beans based on what's on the classpath. If `spring-boot-starter-data-jpa` is in `pom.xml`, it auto-configures a `DataSource`, `EntityManagerFactory`, and `TransactionManager` — you don't write any config. It uses `@Conditional` annotations (e.g., `@ConditionalOnClass(DataSource.class)`) to decide what to configure.
+
+**Q: What is `@SpringBootApplication`?**
+> It's a convenience annotation combining three: (1) `@Configuration` — marks the class as a Spring config source. (2) `@EnableAutoConfiguration` — triggers auto-configuration. (3) `@ComponentScan` — scans the package and sub-packages for `@Component`, `@Service`, `@Repository`, `@Controller`.
+
+**Q: What are Spring Profiles? How do you use them?**
+> Profiles let you activate different config for different environments. `application-dev.properties` for development, `application-prod.properties` for production. Activate with `spring.profiles.active=prod`. With Config Server, you can serve `order-service-dev.properties` vs `order-service-prod.properties` — just pass the profile in the URL: `http://config-server:8888/order-service/prod`.
+
+**Q: What is the difference between `@Component`, `@Service`, `@Repository`, `@Controller`?**
+> All four are specializations of `@Component` — they all register beans. The difference is **semantic**: `@Service` = business logic, `@Repository` = data access (adds DB exception translation), `@Controller` = web layer. Use the right one for the right layer — it makes code self-documenting and enables layer-specific features (e.g., `@Repository` translates SQL exceptions to Spring's `DataAccessException`).
+
+**Q: How does Spring Boot handle externalized configuration priority?**
+> Spring Boot loads config from multiple sources with this priority (highest to lowest):
+> 1. Command-line arguments (`--server.port=9090`)
+> 2. Environment variables (`SERVER_PORT=9090`)
+> 3. Config Server properties
+> 4. `application-{profile}.properties`
+> 5. `application.properties`
+> Higher priority sources override lower ones. This is why Config Server works — its properties override the default `application.properties` but can be overridden by environment variables in production.
 
 ---
 

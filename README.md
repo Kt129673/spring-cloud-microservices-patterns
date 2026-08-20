@@ -10,33 +10,33 @@ The system simulates an e-commerce order fulfillment process involving synchrono
 
 ```mermaid
 graph TD
-    Client([Client / Postman]) -->|HTTP POST /api/orders| Gateway(API Gateway :8080)
+    Client(["Client / Postman"]) -->|HTTP POST /api/orders| Gateway("API Gateway :8080")
     
     subgraph Service Mesh
-        Gateway -->|Routes traffic| OrderService(Order Service :8081)
-        Gateway -->|Routes traffic| InventoryService(Inventory Service :8082)
+        Gateway -->|Routes traffic| OrderService("Order Service :8081")
+        Gateway -->|Routes traffic| InventoryService("Inventory Service :8082")
     end
     
     subgraph Discovery
-        Eureka(Eureka Server :8761) -.->|Registers| Gateway
+        Eureka("Eureka Server :8761") -.->|Registers| Gateway
         Eureka -.->|Registers| OrderService
         Eureka -.->|Registers| InventoryService
-        Eureka -.->|Registers| NotificationService(Notification Service :8083)
+        Eureka -.->|Registers| NotificationService("Notification Service :8083")
     end
     
-    OrderService -->|1. Sync check (Feign)| InventoryService
-    OrderService -->|2. Async Event| Kafka[(Kafka Topic: orders-v2)]
+    OrderService -->|"1. Sync check (Feign)"| InventoryService
+    OrderService -->|2. Async Event| Kafka[("Kafka Topic: orders-v2")]
     
-    Kafka -->|Consumes| InventoryConsumer(Inventory Service Consumer)
-    InventoryConsumer -->|3. Async Event| Kafka2[(Kafka Topic: inventory-events)]
+    Kafka -->|Consumes| InventoryConsumer("Inventory Service Consumer")
+    InventoryConsumer -->|3. Async Event| Kafka2[("Kafka Topic: inventory-events")]
     
-    Kafka2 -->|4. SAGA Compensation| OrderConsumer(Order Service Consumer)
+    Kafka2 -->|4. SAGA Compensation| OrderConsumer("Order Service Consumer")
     Kafka2 -->|5. Notifications| NotificationService
     
     subgraph Observability
-        OrderService -.-> Zipkin(Zipkin Tracing)
+        OrderService -.-> Zipkin("Zipkin Tracing")
         InventoryService -.-> Zipkin
-        OrderService -.-> Logstash(Logstash + ELK)
+        OrderService -.-> Logstash("Logstash + ELK")
         InventoryService -.-> Logstash
     end
 ```

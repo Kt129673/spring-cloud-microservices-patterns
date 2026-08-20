@@ -105,6 +105,12 @@ Each service:
 **Q: What is the main disadvantage of microservices?**
 > A: Distributed system complexity. You now have network latency between services, partial failures (one service down, others up), data consistency challenges (no single database transaction), and operational overhead (monitoring 20 services vs 1 app). You need additional infrastructure like Eureka, Kafka, Zipkin, ELK just to manage it.
 
+**Q: ⚡ Your order-service calls inventory-service, which calls pricing-service, which calls discount-service. Customer reports a 12-second response time. How do you debug this?**
+> A: This is the "distributed latency" trap. Steps: (1) Get the traceId from logs/response headers. (2) Open Zipkin — it shows a waterfall of spans with exact timing per service. (3) Identify the slow span (e.g., pricing-service took 10s). (4) Check Kibana logs for that traceId + service to see if it was a DB query, external API call, or thread pool exhaustion. (5) Check Actuator metrics for that service's p99 latency. The key insight: **you need all three pillars** — traces (Zipkin), logs (ELK), metrics (Actuator) — to debug production issues.
+
+**Q: ⚡ You have a monolith with 500K lines of code. Your manager says "convert to microservices." How do you approach this?**
+> A: **Never do a big-bang rewrite.** Use the Strangler Fig pattern: (1) Identify bounded contexts (e.g., Orders, Payments, Users). (2) Extract ONE module at a time into a microservice, starting with the least coupled one. (3) The monolith calls the new service via REST/Kafka. (4) Repeat until the monolith shrinks. Key: keep the monolith running alongside new services during migration. This can take 1-2 years for large systems.
+
 ---
 
 <a id="2-service-discovery-eureka"></a>
@@ -169,6 +175,12 @@ public interface InventoryClient { }
 **Q: Eureka vs Consul vs Zookeeper?**
 > A: Eureka is AP (Available + Partition-tolerant) — favors availability. Consul is CP (Consistent + Partition-tolerant) — favors consistency. Eureka is simpler and Netflix-battle-tested. Consul adds service mesh, health checks, KV store. For Spring Cloud projects, Eureka is the most common choice.
 
+**Q: ⚡ You deploy inventory-service v2 alongside v1. Eureka now has both registered under the same name. What happens?**
+> A: Both v1 and v2 instances are registered as `inventory-service`. When order-service calls `inventory-service`, the load balancer randomly picks v1 or v2. This is how **rolling deployments** work — but it also means during the transition, some requests hit the old API and some hit the new. That's why backward-compatible API changes are critical in microservices. If v2 has breaking changes, you must use **API versioning** (`/api/v1/inventory`, `/api/v2/inventory`) and route accordingly.
+
+**Q: ⚡ Your service deregisters from Eureka but still receives traffic for 30 seconds. Why?**
+> A: Eureka's registry is **eventually consistent**, not immediately consistent. Other services cache the registry and refresh it every 30 seconds (default `registryFetchIntervalSeconds`). So even after a service deregisters, other services keep calling it until their local cache refreshes. This is the trade-off of AP (availability) over CP (consistency). Mitigation: use shorter cache intervals or combine with circuit breaker to handle connection failures gracefully.
+
 ---
 
 <a id="3-api-gateway"></a>
@@ -227,6 +239,12 @@ spring:
 
 **Q: Why not use Nginx as API Gateway?**
 > A: You can! Nginx/Kong are infrastructure-level gateways (L7 load balancing, SSL termination). Spring Cloud Gateway is an **application-level** gateway — it integrates natively with Eureka, Resilience4j, Micrometer. In production, many companies use **both**: Nginx as external LB + Spring Cloud Gateway as internal router.
+
+**Q: ⚡ The API Gateway is a single point of failure. How do you handle that?**
+> A: Run **multiple instances** of the gateway behind an external load balancer (Nginx, AWS ALB, or Kubernetes Ingress). Each gateway instance registers with Eureka. The external LB health-checks each gateway. If one goes down, the LB routes to the others. The gateway itself is stateless (no session data), so horizontal scaling is trivial.
+
+**Q: ⚡ A client sends a request to `/api/orders`. The gateway forwards it to order-service, which is slow and times out. The client retries. Now you get duplicate orders. How do you prevent this?**
+> A: This is the **idempotency problem**. Solutions: (1) Client generates a unique **idempotency key** (UUID) and sends it in a header like `X-Idempotency-Key`. (2) Order-service checks if that key already exists in a cache/DB before processing. (3) If it exists, return the previous response instead of creating a duplicate. This is standard practice for payment APIs (Stripe, Razorpay all do this).
 
 ---
 
@@ -335,6 +353,12 @@ public class OrderService {
 > 
 > In Spring Cloud projects, Feign is the standard for sync inter-service calls.
 
+**Q: ⚡ Order-service calls inventory-service via Feign. The network is slow. Feign returns after 60 seconds with a timeout. But inventory-service actually DID deduct the stock. Now you have inconsistent data. How do you fix this?**
+> A: This is the classic **distributed timeout problem**. The request succeeded on the server side but the client thinks it failed. Solutions: (1) Make operations **idempotent** — if order-service retries, inventory-service recognizes the duplicate request (using orderId) and returns the existing result. (2) Use the **SAGA pattern** — don't rely on sync Feign for state changes. Use Feign only for **reads** (check stock), and Kafka for **writes** (deduct stock). (3) Add a **reconciliation job** that periodically checks for mismatches between order status and inventory.
+
+**Q: ⚡ Why does `@FeignClient(name = "inventory-service")` work without specifying a URL?**
+> A: Feign integrates with **Spring Cloud LoadBalancer** + **Eureka**. The `name` is used to look up the service in Eureka's registry. Eureka returns all registered instances (e.g., 3 IPs). LoadBalancer picks one using round-robin. The complete chain: `Feign → LoadBalancer → Eureka cache → resolved IP → HTTP call`. If you set `url` explicitly (`@FeignClient(name = "...", url = "http://localhost:8082")`), it bypasses Eureka entirely — useful for testing but never in production.
+
 ---
 
 <a id="6-async-apache-kafka"></a>
@@ -423,6 +447,15 @@ public class OrderConsumer {
 **Q: What is `auto-offset-reset=latest` vs `earliest`?**
 > A: `latest` = new consumer only reads messages that arrive **after** it joins. `earliest` = new consumer reads **all** messages from the beginning. In our project, we use `latest` because we don't want to process old orders when a service restarts.
 
+**Q: ⚡ You have 3 partitions and 5 consumers in the same group. What happens?**
+> A: 2 consumers will be **idle** — sitting there doing nothing. Kafka assigns at most ONE consumer per partition within a group. So with 3 partitions, only 3 consumers get work. The other 2 are standby — they'll take over if an active consumer dies (rebalance). **Rule: adding more consumers than partitions doesn't increase parallelism.** To scale, you must increase partitions first.
+
+**Q: ⚡ Order-service publishes an OrderEvent to Kafka. Inventory-service consumes it and publishes an InventoryEvent. But the InventoryEvent arrives BEFORE the OrderEvent is fully committed. Is that possible?**
+> A: Yes! This is the **event ordering trap** in choreography. The OrderEvent producer's `send()` is async — it might not be acknowledged by Kafka yet when inventory-service already processes and publishes the InventoryEvent. In practice, this rarely causes issues because: (1) Kafka guarantees ordering within a partition, (2) order-service saves the order to DB *before* publishing to Kafka, so when the InventoryEvent arrives, the order exists. But for critical flows, use **transactional outbox pattern** — save the event to a DB table, then a separate process publishes it, ensuring DB commit and event publish are atomic.
+
+**Q: ⚡ Kafka broker goes down. What happens to your microservices?**
+> A: **Producers** will fail to send messages and throw exceptions. If you have `spring.kafka.producer.retries` configured, it retries. If retries exhaust, the send fails — your order-service must handle this (e.g., save order as PENDING, retry later). **Consumers** simply stop receiving messages. When Kafka comes back, consumers resume from their last committed offset — no data loss. The key insight: services that use **sync communication (Feign)** are unaffected by Kafka downtime. Only async flows break.
+
 ---
 
 <a id="7-circuit-breaker-resilience4j"></a>
@@ -501,6 +534,12 @@ public class InventoryFallback implements InventoryClient {
 **Q: What is bulkhead pattern?**
 > A: Separate thread pools for different external calls. If inventory-service call hangs, it only blocks its own thread pool (10 threads). The payment-service thread pool (10 different threads) is unaffected. Like watertight compartments in a ship — one leaks, the whole ship doesn't sink.
 
+**Q: ⚡ Your circuit breaker is OPEN. The fallback returns `inStock=false`. Now ALL orders are rejected, even though inventory-service might have plenty of stock. Is the fallback correct?**
+> A: Tricky! The fallback returning `inStock=false` is actually **wrong for the user experience** — it rejects valid orders. A better fallback strategy depends on the business: (1) **Queue the order** — save as `PENDING` and process when inventory-service recovers. (2) **Optimistic fallback** — return `inStock=true` and let the async SAGA validate later. (3) **Cached data** — return the last known stock level from a local cache. The point: **fallbacks are business decisions, not technical defaults**. Discuss with the product team.
+
+**Q: ⚡ `sliding-window-size=5` and `failure-rate-threshold=50`. You make 5 calls: 2 fail, 3 succeed. Does the circuit open?**
+> A: **No!** 2 failures out of 5 = 40% failure rate. The threshold is 50%. The circuit stays CLOSED. It opens only when the failure rate **reaches or exceeds** 50% (e.g., 3 out of 5 fail). This is a common trick question — candidates confuse "number of failures" with "failure rate percentage." Also note: the sliding window only starts counting after it's full. If you've made only 3 calls, the circuit won't evaluate yet.
+
 ---
 
 <a id="8-load-balancing"></a>
@@ -524,6 +563,9 @@ The `lb://` prefix in gateway routes and Feign's `@FeignClient(name = "...")` bo
 
 **Q: Client-side vs Server-side load balancing?**
 > A: Server-side (Nginx, AWS ELB) — a central server routes traffic. Client-side (Spring Cloud LoadBalancer) — the calling service itself chooses which instance to call using the registry. Spring Cloud uses client-side because each service already has the Eureka registry cached locally.
+
+**Q: ⚡ You have 3 instances of inventory-service. Instance-2 has a memory leak and responds in 10 seconds. Round-robin still sends 33% of traffic to it. How do you fix this?**
+> A: Round-robin is **dumb** — it doesn't consider instance health or response time. Solutions: (1) Use **weighted load balancing** — reduce Instance-2's weight. (2) Use a **health-check-aware** strategy — Spring Cloud LoadBalancer supports custom `ServiceInstanceListSupplier` that filters unhealthy instances. (3) The circuit breaker should eventually trip on Instance-2 due to timeouts, stopping traffic to it. (4) In production, use Kubernetes with **readiness probes** — if Instance-2 is slow, K8s removes it from the service endpoint and stops routing traffic.
 
 ---
 
@@ -593,6 +635,12 @@ sequenceDiagram
 **Q: Choreography vs Orchestration — which is better?**
 > A: For 2-3 services, choreography (event-based) is simpler. For 5+ services with complex flows, orchestration (central coordinator) is better because tracking the flow through 10 event chains becomes unmanageable. Tools like Temporal or Camunda help with orchestration.
 
+**Q: ⚡ In your SAGA, order-service saves an order, publishes to Kafka, then the app crashes BETWEEN the DB save and the Kafka publish. The order is in the DB but the event was never sent. What happens?**
+> A: The order is stuck at `CREATED` forever — it's a **dual-write problem**. The DB commit and Kafka publish are two separate operations that can't be in one transaction. Solution: **Transactional Outbox pattern**. Instead of publishing directly to Kafka: (1) Save the order AND the event to an `outbox` table in the **same DB transaction**. (2) A separate background process (CDC tool like Debezium, or a poller) reads the outbox table and publishes to Kafka. (3) This guarantees: if the order is saved, the event WILL eventually be published.
+
+**Q: ⚡ The compensation event arrives to order-service, but order-service is also down. Who compensates now?**
+> A: Kafka retains the message! When order-service restarts, it consumes the `FAILED` InventoryEvent from its last committed offset and marks the order as FAILED. That's the beauty of Kafka — messages persist even when consumers are down. This is why Kafka is preferred over REST callbacks for SAGA — if you used REST and the service is down, the compensation is lost.
+
 ---
 
 <a id="10-dead-letter-topic"></a>
@@ -625,6 +673,9 @@ orders-v2 topic          →  consumer fails  →  orders-v2.DLT (dead letter)
 
 **Q: What do you do with messages in DLT?**
 > A: Monitor and alert. A DLT consumer logs failed messages to Kibana. Dev team investigates the root cause (bad data? bug? dependency down?), fixes the issue, and then replays the messages from DLT back to the original topic.
+
+**Q: ⚡ A poison message keeps crashing your consumer even after it moves to DLT. You replay it from DLT. It crashes again. How do you break the loop?**
+> A: **Never blindly replay DLT messages.** Process: (1) Inspect the message payload — is it malformed JSON? Invalid field values? (2) Fix the root cause in code (add null checks, input validation, etc.). (3) Deploy the fix. (4) **Only then** replay. If the message is truly unprocessable (corrupt data), move it to a permanent dead-letter store (database table) with metadata about why it failed. Some teams add a `retryCount` field — if it exceeds a threshold, archive it instead of replaying.
 
 ---
 
@@ -675,6 +726,9 @@ If validation fails, Spring automatically returns a `400 Bad Request` with error
 
 **Q: Where should validation happen — controller or service layer?**
 > A: **Both**. Controller-level validation (`@Valid`) handles basic field-level checks (not blank, min value). Service-level validation handles **business rules** (e.g., "this customer has exceeded their credit limit"). They serve different purposes.
+
+**Q: ⚡ Your Kafka consumer receives an `OrderEvent` with `quantity = -5`. There's no `@Valid` on Kafka listeners. How do you validate?**
+> A: Trick! `@Valid` only works with HTTP request bodies (via Spring MVC). Kafka consumers don't trigger Jakarta Validation automatically. You must **manually validate** in the consumer: either call `Validator.validate(event)` programmatically, or add explicit checks (`if (event.getQuantity() < 1) throw ...`). This is a common gap — teams validate REST endpoints but forget to validate Kafka messages. The rule: **validate at every entry point** — REST controllers, Kafka consumers, and Feign responses.
 
 ---
 
@@ -780,6 +834,9 @@ Database → Entity → Service → OrderResponse (DTO) → Client
 **Q: Why not just use the entity for request and response?**
 > A: Three reasons: (1) **Security** — don't expose internal fields like `internalNotes` or `password`. (2) **Decoupling** — changing the database schema shouldn't break the API contract. (3) **Flexibility** — response might combine data from multiple entities or add computed fields.
 
+**Q: ⚡ You add a `discount` field to the `Order` entity. Suddenly, all existing API consumers break. What went wrong?**
+> A: If you're returning the entity directly (no DTO), adding a new field changes the JSON response structure. Consumers that use strict deserialization (e.g., Jackson with `FAIL_ON_UNKNOWN_PROPERTIES = true`) will break. With DTOs, you control exactly what the response contains — adding `discount` to the entity doesn't affect `OrderResponse` until you explicitly add it. This is why DTOs **decouple your internal model from your API contract**.
+
 ---
 
 <a id="14-distributed-tracing-zipkin"></a>
@@ -824,6 +881,12 @@ Zipkin visualizes this as a **waterfall timeline** showing exactly which service
 
 **Q: How are trace IDs propagated across Kafka?**
 > A: Micrometer Tracing with Brave puts the trace ID into **Kafka message headers** (not the message body). The consumer extracts it from headers and continues the same trace. This is done automatically with the `micrometer-tracing-bridge-brave` library.
+
+**Q: ⚡ You set `management.tracing.sampling.probability=1.0` (100%). In production with 10,000 requests/sec, this is a problem. Why?**
+> A: Tracing every request generates massive data — each trace has multiple spans, each span is sent to Zipkin, Zipkin stores it in a DB. At 10K req/sec, that's potentially 50K+ spans/sec. This overwhelms Zipkin, increases network traffic, and adds latency to each request. In production, set sampling to `0.1` (10%) or `0.01` (1%). You still get statistically significant traces for debugging, without the overhead. Use `1.0` only in dev/staging.
+
+**Q: ⚡ A request hits the gateway, goes through order-service, then inventory-service responds via Kafka. But Zipkin shows the Kafka leg as a SEPARATE trace. Why?**
+> A: Trace context propagation across Kafka requires `micrometer-tracing-bridge-brave` on **both** the producer and consumer side. If the consumer service is missing this dependency, or if you're using a custom `KafkaTemplate` that doesn't propagate headers, the trace context is lost and a new trace starts. Check that all services have the tracing bridge dependency and that you're not stripping Kafka headers in custom deserializers.
 
 ---
 
@@ -887,6 +950,9 @@ output { elasticsearch { hosts => ["elasticsearch:9200"] } }
 
 **Q: ELK vs Loki+Grafana?**
 > A: ELK is more powerful (full-text search, complex queries) but heavier (Elasticsearch needs lots of RAM). Loki (by Grafana) is lightweight and uses labels instead of full-text indexing — much cheaper to run. ELK is the industry standard for log analytics. Loki is gaining popularity for Kubernetes environments.
+
+**Q: ⚡ Logstash goes down. Your services keep running. What happens to the logs?**
+> A: Logs sent via TCP to Logstash will **fail silently** (connection refused). The `LogstashTcpSocketAppender` in Logback has an internal buffer and retry mechanism — it will attempt to reconnect. But if Logstash is down for long, the buffer fills and logs are **dropped**. Console logs still work (they go to stdout). Mitigation: (1) Use Logstash's **persistent queue** feature. (2) Write logs to **files + ship with Filebeat** instead of direct TCP (Filebeat tracks its position and resumes after Logstash recovery). (3) Run multiple Logstash instances.
 
 ---
 
@@ -953,6 +1019,12 @@ In production, Kubernetes or load balancers use `/actuator/health` to decide:
 **Q: What is the difference between liveness and readiness probes?**
 > A: **Liveness** = "Is the process alive?" If no → restart the container. **Readiness** = "Can it handle requests?" If no → stop sending traffic, but don't restart. Example: a service is alive but still loading data from DB → liveness=UP, readiness=DOWN until loading is complete.
 
+**Q: ⚡ `/actuator/health` returns UP but your service is actually not processing requests (threads are deadlocked). How do you detect this?**
+> A: Default health check only verifies that the Spring context is alive and DB/Kafka connections exist — it doesn't test actual request processing. Solutions: (1) Add a **custom health indicator** that tests a critical code path (e.g., execute a simple DB query). (2) Use **liveness vs readiness** separation — liveness checks JVM, readiness checks if the app can handle work. (3) Monitor **request latency metrics** via Actuator — if p99 latency spikes to infinity, alert. (4) Use `/actuator/threaddump` endpoint to detect deadlocks.
+
+**Q: ⚡ You expose `/actuator/env` in production. Why is this a security risk?**
+> A: `/actuator/env` exposes **all environment variables and config properties** — including database passwords, API keys, Kafka credentials. Even if Spring sanitizes some values, it's a huge attack surface. In production, only expose `health` and `info`. **Never** expose `env`, `configprops`, `beans`, or `heapdump` without authentication. Use `management.endpoints.web.exposure.include=health,info` and secure other endpoints with Spring Security.
+
 ---
 
 <a id="18-docker-and-docker-compose"></a>
@@ -1015,6 +1087,9 @@ When you stop the service:
 
 **Q: How do you deploy a new version without downtime?**
 > A: Rolling deployment. Run 3 instances. Deploy new version to instance 1 (graceful shutdown + restart). Once it's healthy, deploy to instance 2, then 3. At any point, at least 2 instances are serving traffic. Kubernetes handles this automatically.
+
+**Q: ⚡ You set `timeout-per-shutdown-phase=30s`. A Kafka consumer is processing a batch of 1000 messages that takes 60 seconds. What happens during shutdown?**
+> A: After 30 seconds, Spring **forcibly terminates** the application — the remaining messages are abandoned mid-processing. Kafka hasn't committed offsets for unfinished messages, so they'll be **redelivered** on restart (if using at-least-once). This means your consumer must be **idempotent** — processing the same message twice should be safe. The fix: either increase the timeout, reduce batch sizes, or process messages individually with offset commits per message.
 
 ---
 
